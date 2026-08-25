@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }})
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check Formatting
+        run: cargo fmt --check
+
+      - name: Run Clippy Linter
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Run Tests
+        run: cargo test --all-targets --all-features
+
+      - name: Build Release Binary
+        run: cargo build --release

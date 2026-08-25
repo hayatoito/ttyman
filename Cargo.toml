@@ -1,0 +1,42 @@
+[package]
+name = "ttyman"
+version = "0.1.0"
+edition = "2024"
+authors = ["Hayato Ito <hayatoito@gmail.com>"]
+license = "MIT OR Apache-2.0"
+description = "Terminal session manager to persist and attach sessions, inspect screens and scrollback, stream live output, and inject input via IPC"
+readme = "README.md"
+repository = "https://github.com/hayatoito/ttyman"
+homepage = "https://github.com/hayatoito/ttyman"
+keywords = ["terminal", "pty", "session", "manager", "remapper"]
+categories = ["command-line-utilities", "development-tools"]
+
+[dependencies]
+anyhow = "1.0"
+thiserror = "2.0"
+clap = { version = "4.6", features = ["derive", "env"] }
+nix = { version = "0.31", features = ["ioctl", "process", "signal", "term", "fs", "poll", "user"] }
+crossterm = "0.29"
+tokio = { version = "1.53", features = ["full"] }
+vt100 = "0.16"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "1.1"
+
+[[bin]]
+name = "ttyman"
+path = "src/main.rs"
+
+[dev-dependencies]
+criterion = "0.5"
+proptest = "1.11"
+tempfile = "3.27"
+
+[[bench]]
+name = "benchmark"
+harness = false
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
