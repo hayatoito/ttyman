@@ -2,7 +2,6 @@ use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use nix::fcntl::{FcntlArg, OFlag, fcntl};
 use nix::libc;
 use nix::pty::{OpenptyResult, Winsize, openpty};
-use nix::sys::termios::{Termios, tcgetattr};
 use nix::unistd::isatty;
 use std::io;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, RawFd};
@@ -80,11 +79,8 @@ pub fn set_terminal_winsize(fd: RawFd, ws: &Winsize) {
     }
 }
 
-pub fn open_pty_pair(
-    winsize: Option<&Winsize>,
-    termios: Option<&Termios>,
-) -> nix::Result<OpenptyResult> {
-    let pty_res = openpty(winsize, termios)?;
+pub fn open_pty_pair(winsize: Option<&Winsize>) -> nix::Result<OpenptyResult> {
+    let pty_res = openpty(winsize, None)?;
     let flags = fcntl(&pty_res.master, FcntlArg::F_GETFL)?;
     let _ = fcntl(
         &pty_res.master,
@@ -93,6 +89,37 @@ pub fn open_pty_pair(
     Ok(pty_res)
 }
 
-pub fn get_parent_termios() -> Option<Termios> {
-    unsafe { tcgetattr(BorrowedFd::borrow_raw(0)).ok() }
+/// Configures controlling terminal, redirects standard I/O (0, 1, 2) to the PTY slave,
+/// sets session environment variables, and executes the specified command.
+/// This function never returns on success, and exits with code 127 on failure.
+pub fn exec_in_child_pty(
+    slave_fd: std::os::fd::OwnedFd,
+    session_name: &str,
+    daemon_pid: u32,
+    exec_cmd: &str,
+    exec_args: &[String],
+) -> ! {
+    let _ = nix::unistd::setsid();
+    let slave_raw = slave_fd.as_raw_fd();
+    unsafe {
+        libc::ioctl(slave_raw, libc::TIOCSCTTY as _, 0);
+        libc::dup2(slave_raw, 0);
+        libc::dup2(slave_raw, 1);
+        libc::dup2(slave_raw, 2);
+    }
+    drop(slave_fd);
+
+    unsafe {
+        std::env::set_var(crate::ipc::DEFAULT_SESSION_VAR, session_name);
+        std::env::set_var("TTYMAN_PID", daemon_pid.to_string());
+    }
+
+    let c_cmd = std::ffi::CString::new(exec_cmd).unwrap_or_default();
+    let c_args: Vec<std::ffi::CString> = exec_args
+        .iter()
+        .map(|a| std::ffi::CString::new(a.as_str()).unwrap_or_default())
+        .collect();
+
+    let _ = nix::unistd::execvp(&c_cmd, &c_args);
+    std::process::exit(127);
 }

@@ -8,7 +8,7 @@
 #   - Instant session switching (Enter)
 #   - Dynamic new session creation (type any new name + Enter)
 #   - Interactive session rename (Ctrl-R)
-#   - Terminate / kill session from menu by PID (Ctrl-X)
+#   - Terminate / kill session from menu (Ctrl-X)
 #   - Cancel and restore terminal cleanly (ESC)
 # ==============================================================================
 set -eo pipefail
@@ -30,11 +30,10 @@ if [ "${1:-}" = "--preview" ]; then
         exit 0
     fi
 
-    if [ "$item" = "[detach]" ] || [ "$item" = "detach" ]; then
+    if [ "$item" = "[detach]" ]; then
         echo -e "\033[1;33m[Detach Session]\033[0m"
         echo ""
-        echo "Cleanly leaves the active session."
-        echo "The session continues running in the background."
+        echo "Leaves the active session while keeping it running in the background."
         exit 0
     fi
 
@@ -44,15 +43,12 @@ if [ "${1:-}" = "--preview" ]; then
     exit 0
 fi
 
-# 2. Kill helper: terminates session process by PID
+# 2. Kill helper: cleanly terminates session via ttyman kill
 if [ "${1:-}" = "--kill" ]; then
     raw_item="${2:-}"
     name=$(echo "$raw_item" | sed -E 's/^[ *][ ]//')
-    if [ "$name" != "[detach]" ] && [ "$name" != "detach" ] && [ -n "$name" ]; then
-        pid=$(ttyman list --json 2>/dev/null | jq -r --arg n "$name" '.[] | select(.name == $n) | .pid' 2>/dev/null || true)
-        if [ -n "$pid" ] && [ "$pid" != "null" ]; then
-            kill "$pid" 2>/dev/null || true
-        fi
+    if [ "$name" != "[detach]" ] && [ -n "$name" ]; then
+        ttyman kill -s "$name" 2>/dev/null || true
     fi
     exit 0
 fi
@@ -61,7 +57,7 @@ fi
 if [ "${1:-}" = "--rename" ]; then
     raw_item="${2:-}"
     name=$(echo "$raw_item" | sed -E 's/^[ *][ ]//')
-    if [ "$name" != "[detach]" ] && [ "$name" != "detach" ] && [ -n "$name" ]; then
+    if [ "$name" != "[detach]" ] && [ -n "$name" ]; then
         echo ""
         read -r -p "Rename session '$name' to: " new_name < /dev/tty || true
         if [ -n "$new_name" ] && [ "$new_name" != "$name" ]; then
@@ -135,12 +131,12 @@ query=$(echo "$selected_raw" | sed -n '1p')
 raw_selection=$(echo "$selected_raw" | sed -n '2p')
 selection=$(echo "$raw_selection" | sed -E 's/^[ *][ ]//')
 
-if [ "$selection" = "[detach]" ] || [ "$selection" = "detach" ]; then
+if [ "$selection" = "[detach]" ]; then
     echo "detach"
 elif [ -n "$selection" ]; then
-    echo "attach:$selection"
+    echo "attach $selection"
 elif [ -n "$query" ]; then
-    echo "attach:$query"
+    echo "attach $query"
 else
     exit 130
 fi

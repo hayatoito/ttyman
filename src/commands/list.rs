@@ -1,11 +1,9 @@
-use crate::ipc::{IpcRequest, IpcResponse, SessionInfo};
+use crate::ipc::SessionInfo;
 use clap::Args;
 use nix::sys::signal::kill;
 use nix::unistd::Pid;
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixStream;
 
 #[derive(Args, Debug, Clone)]
 pub struct ListArgs {
@@ -25,37 +23,16 @@ pub struct SessionEntry {
     pub socket: String,
     pub command: Vec<String>,
     pub term_size: (u16, u16),
-    pub persist: bool,
     pub clients: usize,
     pub age_secs: u64,
     pub is_alive: bool,
+    pub is_current: bool,
 }
 
 use crate::ipc::parse_name_from_socket_path;
 
 async fn query_session(socket_path: &Path) -> Option<SessionInfo> {
-    let timeout = Duration::from_millis(150);
-    tokio::time::timeout(timeout, async {
-        let stream = UnixStream::connect(socket_path).await.ok()?;
-        let (reader, mut writer) = stream.into_split();
-        let mut buf_reader = BufReader::new(reader);
-
-        let req = IpcRequest::Info;
-        let mut req_str = serde_json::to_string(&req).ok()?;
-        req_str.push('\n');
-        writer.write_all(req_str.as_bytes()).await.ok()?;
-        writer.flush().await.ok()?;
-
-        let mut resp_str = String::new();
-        buf_reader.read_line(&mut resp_str).await.ok()?;
-        match serde_json::from_str::<IpcResponse>(&resp_str).ok()? {
-            IpcResponse::Info(info) => Some(info),
-            _ => None,
-        }
-    })
-    .await
-    .ok()
-    .flatten()
+    crate::ipc::query_session_info_async(socket_path, Duration::from_millis(150)).await
 }
 
 fn parse_pid_from_socket_name(path: &Path) -> Option<u32> {
@@ -88,6 +65,8 @@ pub async fn run(args: ListArgs) -> anyhow::Result<()> {
 
     let mut entries = Vec::new();
     let mut cleaned_count = 0;
+
+    let current_session_env = std::env::var(crate::ipc::DEFAULT_SESSION_VAR).ok();
 
     for sock in socket_paths {
         let pid_opt = parse_pid_from_socket_name(&sock);
@@ -123,8 +102,9 @@ pub async fn run(args: ListArgs) -> anyhow::Result<()> {
         let term_size = info.as_ref().map(|i| i.term_size).unwrap_or((0, 0));
 
         let name = parse_name_from_socket_path(&sock);
-        let persist = info.as_ref().map(|i| i.persist).unwrap_or(false);
         let clients = info.as_ref().map(|i| i.clients).unwrap_or(0);
+        let is_current = current_session_env.as_deref() == Some(&name)
+            || current_session_env.as_deref() == Some(&pid.to_string());
 
         entries.push(SessionEntry {
             name,
@@ -132,10 +112,10 @@ pub async fn run(args: ListArgs) -> anyhow::Result<()> {
             socket: sock.to_string_lossy().to_string(),
             command,
             term_size,
-            persist,
             clients,
             age_secs,
             is_alive: alive,
+            is_current,
         });
     }
 
@@ -148,18 +128,20 @@ pub async fn run(args: ListArgs) -> anyhow::Result<()> {
         if cleaned_count > 0 {
             println!("No active sessions (cleaned {cleaned_count} stale sockets).");
         } else {
-            println!("No active ttyman sessions found.");
+            println!("No active sessions found.");
         }
         return Ok(());
     }
 
     // Print table header
     println!(
-        "{:<18} {:<8} {:<24} {:<10} {:<9} {:<9} {:<10}",
-        "NAME", "PID", "COMMAND", "SIZE", "PERSIST", "CLIENTS", "AGE"
+        "  {:<18} {:<8} {:<32} {:<10} {:<9} {:<10}",
+        "NAME", "PID", "COMMAND", "SIZE", "CLIENTS", "AGE"
     );
 
     for entry in &entries {
+        let marker = if entry.is_current { "* " } else { "  " };
+
         let name_display = if entry.name.len() > 17 {
             format!("{}...", &entry.name[..14])
         } else {
@@ -167,8 +149,8 @@ pub async fn run(args: ListArgs) -> anyhow::Result<()> {
         };
 
         let cmd_str = entry.command.join(" ");
-        let cmd_display = if cmd_str.len() > 23 {
-            format!("{}...", &cmd_str[..20])
+        let cmd_display = if cmd_str.len() > 31 {
+            format!("{}...", &cmd_str[..28])
         } else {
             cmd_str
         };
@@ -179,16 +161,8 @@ pub async fn run(args: ListArgs) -> anyhow::Result<()> {
             format!("{}x{}", entry.term_size.1, entry.term_size.0)
         };
 
-        let persist_display = if !entry.is_alive {
-            "dead"
-        } else if entry.persist {
-            "yes"
-        } else {
-            "no"
-        };
-
         let clients_display = if !entry.is_alive {
-            "-".to_string()
+            "dead".to_string()
         } else {
             entry.clients.to_string()
         };
@@ -200,14 +174,8 @@ pub async fn run(args: ListArgs) -> anyhow::Result<()> {
         };
 
         println!(
-            "{:<18} {:<8} {:<24} {:<10} {:<9} {:<9} {:<10}",
-            name_display,
-            entry.pid,
-            cmd_display,
-            size_display,
-            persist_display,
-            clients_display,
-            age_display
+            "{marker}{:<18} {:<8} {:<32} {:<10} {:<9} {:<10}",
+            name_display, entry.pid, cmd_display, size_display, clients_display, age_display
         );
     }
 

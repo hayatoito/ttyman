@@ -8,12 +8,11 @@ description = "Terminal session manager to persist and attach sessions, inspect 
 readme = "README.md"
 repository = "https://github.com/hayatoito/ttyman"
 homepage = "https://github.com/hayatoito/ttyman"
-keywords = ["terminal", "pty", "session", "manager", "remapper"]
+keywords = ["terminal", "pty", "session", "manager", "ipc"]
 categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
 anyhow = "1.0"
-thiserror = "2.0"
 clap = { version = "4.6", features = ["derive", "env"] }
 nix = { version = "0.31", features = ["ioctl", "process", "signal", "term", "fs", "poll", "user"] }
 crossterm = "0.29"
@@ -29,7 +28,6 @@ path = "src/main.rs"
 
 [dev-dependencies]
 criterion = "0.5"
-proptest = "1.11"
 tempfile = "3.27"
 
 [[bench]]

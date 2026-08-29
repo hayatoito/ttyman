@@ -1,5 +1,5 @@
 use clap::{Parser, Subcommand};
-use ttyman::commands::{attach, list, play, read, record, rename, run, start, watch, write};
+use ttyman::commands::{attach, kill, list, read, rename, start, watch, write};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -14,23 +14,17 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Run a command or interactive shell in a foreground PTY proxy with an IPC socket
-    Run(run::RunArgs),
-
     /// Start a session in the background (detached daemon)
     Start(start::StartArgs),
+
+    /// Kill an active session
+    Kill(kill::KillArgs),
 
     /// Attach interactively to a session (spawns if not already running)
     Attach(attach::AttachArgs),
 
     /// Rename an active session
     Rename(rename::RenameArgs),
-
-    /// Record stdin stream into a .ttyrec-compatible format
-    Record(record::RecordArgs),
-
-    /// Play back a recorded .ttyrec file (or inspect duration with --time)
-    Play(play::PlayArgs),
 
     /// Watch and stream a live running session in real-time
     Watch(watch::WatchArgs),
@@ -41,7 +35,7 @@ enum Commands {
     /// Write text or inject commands into a running session
     Write(write::WriteArgs),
 
-    /// List active sessions and inspect socket status
+    /// List active sessions
     List(list::ListArgs),
 }
 
@@ -49,40 +43,13 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let res = match cli.command {
         Commands::Start(args) => start::run(args),
+        Commands::Kill(args) => kill::run(args),
         Commands::Attach(args) => attach::run(args),
-        Commands::Rename(args) => {
-            let rt = tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()?;
-            rt.block_on(rename::run(args))
-        }
-        Commands::Record(args) => record::run(args),
-        Commands::Play(args) => play::run(args),
+        Commands::Rename(args) => ttyman::run_async(rename::run(args)),
         Commands::Watch(args) => watch::run(args),
-        Commands::Run(args) => {
-            let rt = tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()?;
-            rt.block_on(run::run(args))
-        }
-        Commands::Read(args) => {
-            let rt = tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()?;
-            rt.block_on(read::run(args))
-        }
-        Commands::Write(args) => {
-            let rt = tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()?;
-            rt.block_on(write::run(args))
-        }
-        Commands::List(args) => {
-            let rt = tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()?;
-            rt.block_on(list::run(args))
-        }
+        Commands::Read(args) => ttyman::run_async(read::run(args)),
+        Commands::Write(args) => ttyman::run_async(write::run(args)),
+        Commands::List(args) => ttyman::run_async(list::run(args)),
     };
     match res {
         Ok(()) => std::process::exit(0),

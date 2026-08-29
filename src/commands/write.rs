@@ -1,8 +1,6 @@
-use crate::ipc::{IpcRequest, IpcResponse, resolve_socket_path};
+use crate::ipc::{IpcRequest, IpcResponse, resolve_socket_path, send_ipc_request};
 use clap::Args;
 use std::io::Read;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixStream;
 
 #[derive(Args, Debug, Clone)]
 pub struct WriteArgs {
@@ -26,7 +24,8 @@ pub async fn run(args: WriteArgs) -> anyhow::Result<()> {
     let sock_path = resolve_socket_path(args.session.as_deref())?;
 
     if !sock_path.exists() {
-        let display = args.session.as_deref().unwrap_or("current");
+        let session_name = crate::ipc::parse_name_from_socket_path(&sock_path);
+        let display = args.session.as_deref().unwrap_or(&session_name);
         anyhow::bail!("Session '{display}' not found. Is the session active?");
     }
 
@@ -39,27 +38,16 @@ pub async fn run(args: WriteArgs) -> anyhow::Result<()> {
         Some(s) => s.to_string(),
     };
 
-    let stream = UnixStream::connect(&sock_path).await?;
-    let (reader, mut writer) = stream.into_split();
-    let mut buf_reader = BufReader::new(reader);
-
     let req = IpcRequest::Write {
         text: raw_text,
         enter: args.enter,
         bracketed_paste: args.bracketed_paste,
     };
-    let mut req_str = serde_json::to_string(&req)?;
-    req_str.push('\n');
-    writer.write_all(req_str.as_bytes()).await?;
-    writer.flush().await?;
 
-    let mut resp_str = String::new();
-    buf_reader.read_line(&mut resp_str).await?;
-    let resp: IpcResponse = serde_json::from_str(&resp_str)?;
-
+    let resp = send_ipc_request(&sock_path, &req).await?;
     match resp {
         IpcResponse::Ok(_) => Ok(()),
-        IpcResponse::Error(e) => anyhow::bail!("IPC Error: {e}"),
-        _ => anyhow::bail!("Unexpected IPC response"),
+        IpcResponse::Error(e) => anyhow::bail!("{e}"),
+        _ => anyhow::bail!("Unexpected response from session"),
     }
 }

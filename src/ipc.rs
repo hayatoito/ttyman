@@ -39,8 +39,6 @@ pub struct SessionInfo {
     pub command: Vec<String>,
     pub term_size: (u16, u16),
     #[serde(default)]
-    pub persist: bool,
-    #[serde(default)]
     pub clients: usize,
     #[serde(default)]
     pub pty_slave_path: Option<String>,
@@ -70,7 +68,105 @@ pub fn query_session_info<P: AsRef<std::path::Path>>(sock_path: P) -> anyhow::Re
     match serde_json::from_str::<IpcResponse>(&line) {
         Ok(IpcResponse::Info(info)) => Ok(info),
         Ok(IpcResponse::Error(e)) => anyhow::bail!("{e}"),
-        _ => anyhow::bail!("Invalid IPC response for Info"),
+        _ => anyhow::bail!("Invalid response from session"),
+    }
+}
+
+/// Check if a Unix socket file exists and is accepting connections.
+/// If connection fails, any stale socket file is automatically removed.
+pub fn is_socket_alive<P: AsRef<Path>>(sock_path: P) -> bool {
+    let p = sock_path.as_ref();
+    if p.exists() {
+        match std::os::unix::net::UnixStream::connect(p) {
+            Ok(_) => true,
+            Err(_) => {
+                let _ = std::fs::remove_file(p);
+                false
+            }
+        }
+    } else {
+        false
+    }
+}
+
+/// Check if the target socket corresponds to the current terminal or current session
+/// (to prevent self-attaching and recursive multiplexer loops).
+pub fn is_self_session<P: AsRef<Path>>(target_sock: P) -> bool {
+    let target = target_sock.as_ref();
+    let current_env_session = std::env::var(DEFAULT_SESSION_VAR).ok();
+    let current_env_sock = match current_env_session.as_deref() {
+        Some(name) => resolve_socket_path(Some(name)).ok(),
+        None => None,
+    };
+
+    if let Some(ref cur_sock) = current_env_sock
+        && (target == cur_sock
+            || (target.exists()
+                && cur_sock.exists()
+                && std::fs::canonicalize(target).ok() == std::fs::canonicalize(cur_sock).ok()))
+    {
+        return true;
+    }
+
+    if target.exists()
+        && let Some(my_tty) = get_current_tty_name()
+        && let Ok(info) = query_session_info(target)
+    {
+        return info.pty_slave_path.as_deref() == Some(&my_tty);
+    }
+
+    false
+}
+
+/// Send an IPC request to a running ttyman session and await the response.
+pub async fn send_ipc_request(sock_path: &Path, req: &IpcRequest) -> anyhow::Result<IpcResponse> {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::UnixStream;
+
+    let stream = UnixStream::connect(sock_path).await.map_err(|e| {
+        let name = parse_name_from_socket_path(sock_path);
+        anyhow::anyhow!("Failed to connect to session '{name}': {e}")
+    })?;
+
+    let (reader, mut writer) = stream.into_split();
+    let mut buf_reader = BufReader::new(reader);
+
+    let mut req_str = serde_json::to_string(req)?;
+    req_str.push('\n');
+    writer.write_all(req_str.as_bytes()).await?;
+    writer.flush().await?;
+
+    let mut line = String::new();
+    if buf_reader.read_line(&mut line).await? == 0 {
+        anyhow::bail!("Session closed connection unexpectedly");
+    }
+
+    let resp: IpcResponse = serde_json::from_str(&line)?;
+    Ok(resp)
+}
+
+/// Send an IPC request with a timeout.
+pub async fn send_ipc_request_timeout(
+    sock_path: &Path,
+    req: &IpcRequest,
+    timeout: std::time::Duration,
+) -> anyhow::Result<IpcResponse> {
+    tokio::time::timeout(timeout, send_ipc_request(sock_path, req))
+        .await
+        .map_err(|_| {
+            let name = parse_name_from_socket_path(sock_path);
+            anyhow::anyhow!("IPC request to session '{name}' timed out")
+        })?
+}
+
+/// Asynchronously query session info with timeout (used by `list`).
+pub async fn query_session_info_async(
+    sock_path: &Path,
+    timeout: std::time::Duration,
+) -> Option<SessionInfo> {
+    match send_ipc_request_timeout(sock_path, &IpcRequest::Info, timeout).await {
+        Ok(IpcResponse::Info(info)) => Some(info),
+        _ => None,
     }
 }
 
@@ -165,82 +261,44 @@ pub fn named_socket_path(name: &str) -> anyhow::Result<PathBuf> {
     Ok(get_runtime_dir()?.join(format!("ttyman-{name}")))
 }
 
-pub fn resolve_socket_path(target: Option<&str>) -> anyhow::Result<PathBuf> {
+fn find_socket_for_name(name: &str) -> anyhow::Result<PathBuf> {
+    validate_session_name(name)?;
     let uid = nix::unistd::geteuid().as_raw();
     let fallback_dir = PathBuf::from(format!("/tmp/ttyman-{uid}"));
 
-    if let Some(s) = target {
-        validate_session_name(s)?;
-        if let Ok(pid) = s.parse::<u32>() {
-            let named = named_socket_path(s)?;
-            if named.exists() {
-                return Ok(named);
-            }
-            let def = default_socket_path(pid)?;
-            if def.exists() {
-                return Ok(def);
-            }
-            let fb_named = fallback_dir.join(format!("ttyman-{s}"));
-            if fb_named.exists() {
-                return Ok(fb_named);
-            }
-            let fb_def = fallback_dir.join(format!("ttyman-{pid}"));
-            if fb_def.exists() {
-                return Ok(fb_def);
-            }
-            return Ok(named);
-        }
-        let named = named_socket_path(s)?;
-        if named.exists() {
-            return Ok(named);
-        }
-        let fb_named = fallback_dir.join(format!("ttyman-{s}"));
-        if fb_named.exists() {
-            return Ok(fb_named);
-        }
+    let named = named_socket_path(name)?;
+    if named.exists() {
         return Ok(named);
     }
-    if let Ok(s) = std::env::var(DEFAULT_SESSION_VAR)
-        && let Ok(()) = validate_session_name(&s)
-    {
-        let p = if let Ok(pid) = s.parse::<u32>() {
-            let named = named_socket_path(&s)?;
-            if named.exists() {
-                named
-            } else {
-                let def = default_socket_path(pid)?;
-                if def.exists() {
-                    def
-                } else {
-                    let fb_named = fallback_dir.join(format!("ttyman-{s}"));
-                    if fb_named.exists() {
-                        fb_named
-                    } else {
-                        let fb_def = fallback_dir.join(format!("ttyman-{pid}"));
-                        if fb_def.exists() {
-                            fb_def
-                        } else {
-                            named
-                        }
-                    }
-                }
-            }
-        } else {
-            let named = named_socket_path(&s)?;
-            if named.exists() {
-                named
-            } else {
-                let fb_named = fallback_dir.join(format!("ttyman-{s}"));
-                if fb_named.exists() {
-                    fb_named
-                } else {
-                    named
-                }
-            }
-        };
-        if p.exists() {
-            return Ok(p);
+    if let Ok(pid) = name.parse::<u32>() {
+        let def = default_socket_path(pid)?;
+        if def.exists() {
+            return Ok(def);
         }
+    }
+    let fb_named = fallback_dir.join(format!("ttyman-{name}"));
+    if fb_named.exists() {
+        return Ok(fb_named);
+    }
+    if let Ok(pid) = name.parse::<u32>() {
+        let fb_def = fallback_dir.join(format!("ttyman-{pid}"));
+        if fb_def.exists() {
+            return Ok(fb_def);
+        }
+    }
+    Ok(named)
+}
+
+pub fn resolve_socket_path(target: Option<&str>) -> anyhow::Result<PathBuf> {
+    if let Some(s) = target {
+        return find_socket_for_name(s);
+    }
+
+    if let Ok(s) = std::env::var(DEFAULT_SESSION_VAR)
+        && let Ok(p) = find_socket_for_name(&s)
+        && p.exists()
+    {
+        return Ok(p);
     }
     // Fallback: If $TTYMAN_SESSION is missing or stale (e.g. after rename),
     // find the active session socket associated with $TTYMAN_PID.
@@ -373,7 +431,6 @@ mod tests {
             started_at_epoch_sec: 1700000000,
             command: vec!["zsh".into(), "-i".into()],
             term_size: (24, 80),
-            persist: true,
             clients: 2,
             pty_slave_path: Some("/dev/pts/1".into()),
         };
@@ -384,7 +441,6 @@ mod tests {
             IpcResponse::Info(i) => {
                 assert_eq!(i.pid, 12345);
                 assert_eq!(i.command, vec!["zsh", "-i"]);
-                assert!(i.persist);
                 assert_eq!(i.clients, 2);
                 assert_eq!(i.pty_slave_path.as_deref(), Some("/dev/pts/1"));
             }
@@ -463,8 +519,62 @@ mod tests {
 
     #[test]
     fn test_parse_name_from_socket_path() {
-        assert_eq!(parse_name_from_socket_path(Path::new("/tmp/ttyman-main")), "main");
-        assert_eq!(parse_name_from_socket_path(Path::new("/run/user/1000/ttyman-12345")), "12345");
-        assert_eq!(parse_name_from_socket_path(Path::new("ttyman-worker")), "worker");
+        assert_eq!(
+            parse_name_from_socket_path(Path::new("/tmp/ttyman-main")),
+            "main"
+        );
+        assert_eq!(
+            parse_name_from_socket_path(Path::new("/run/user/1000/ttyman-12345")),
+            "12345"
+        );
+        assert_eq!(
+            parse_name_from_socket_path(Path::new("ttyman-worker")),
+            "worker"
+        );
+    }
+
+    #[test]
+    fn test_is_socket_alive_nonexistent() {
+        let fake = Path::new("/tmp/ttyman-nonexistent-socket-test-12345");
+        assert!(!is_socket_alive(fake));
+    }
+
+    #[test]
+    fn test_is_self_session_nonexistent() {
+        let fake = Path::new("/tmp/ttyman-nonexistent-socket-test-12345");
+        assert!(!is_self_session(fake));
+    }
+
+    #[tokio::test]
+    async fn test_send_ipc_request_roundtrip() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        use tokio::net::UnixListener;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let sock_path = temp_dir.path().join("test.sock");
+        let listener = UnixListener::bind(&sock_path).unwrap();
+
+        // Spawn mock server
+        tokio::spawn(async move {
+            if let Ok((stream, _)) = listener.accept().await {
+                let (reader, mut writer) = stream.into_split();
+                let mut buf_reader = BufReader::new(reader);
+                let mut line = String::new();
+                if buf_reader.read_line(&mut line).await.is_ok() {
+                    let resp = IpcResponse::Ok("pong".into());
+                    let mut resp_str = serde_json::to_string(&resp).unwrap();
+                    resp_str.push('\n');
+                    let _ = writer.write_all(resp_str.as_bytes()).await;
+                }
+            }
+        });
+
+        let resp = send_ipc_request(&sock_path, &IpcRequest::Ping)
+            .await
+            .unwrap();
+        match resp {
+            IpcResponse::Ok(s) => assert_eq!(s, "pong"),
+            _ => panic!("unexpected response"),
+        }
     }
 }

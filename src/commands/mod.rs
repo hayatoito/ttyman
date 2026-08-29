@@ -1,10 +1,8 @@
 pub mod attach;
+pub mod kill;
 pub mod list;
-pub mod play;
 pub mod read;
-pub mod record;
 pub mod rename;
-pub mod run;
 pub mod start;
 pub mod watch;
 pub mod write;

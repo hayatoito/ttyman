@@ -44,24 +44,28 @@ impl Terminal {
             Err(e) => e.into_inner(),
         };
 
-        let initial_scrollback = parser.screen().scrollback();
+        // Determine the total number of buffered scrollback lines by setting offset to MAX (clamped to actual length)
+        parser.screen_mut().set_scrollback(usize::MAX);
+        let total_scrollback = parser.screen().scrollback();
         let (rows, cols) = parser.screen().size();
+        let r_size = rows as usize;
 
-        // 1. Collect scrollback rows
-        let mut all_lines: Vec<String> = Vec::new();
-        for offset in (1..=initial_scrollback).rev() {
-            parser.screen_mut().set_scrollback(offset);
-            let row_str = if with_color {
-                parser
-                    .screen()
-                    .rows_formatted(0, cols)
-                    .next()
-                    .map(|r| String::from_utf8_lossy(&r).to_string())
-                    .unwrap_or_default()
+        // 1. Collect scrollback rows in page chunks (from oldest to newest)
+        let mut all_lines: Vec<String> = Vec::with_capacity(total_scrollback + r_size);
+        let mut remaining = total_scrollback;
+        while remaining > 0 && r_size > 0 {
+            let chunk_size = remaining.min(r_size);
+            parser.screen_mut().set_scrollback(remaining);
+            if with_color {
+                for row_bytes in parser.screen().rows_formatted(0, cols).take(chunk_size) {
+                    all_lines.push(String::from_utf8_lossy(&row_bytes).to_string());
+                }
             } else {
-                parser.screen().rows(0, cols).next().unwrap_or_default()
-            };
-            all_lines.push(row_str);
+                for row in parser.screen().rows(0, cols).take(chunk_size) {
+                    all_lines.push(row);
+                }
+            }
+            remaining -= chunk_size;
         }
 
         // 2. Collect visible screen rows and determine the last active row
@@ -69,9 +73,7 @@ impl Terminal {
         let (cursor_row, _) = parser.screen().cursor_position();
 
         let visible_plain: Vec<String> = parser.screen().rows(0, cols).collect();
-        let last_content_row = visible_plain
-            .iter()
-            .rposition(|r| !r.trim().is_empty());
+        let last_content_row = visible_plain.iter().rposition(|r| !r.trim().is_empty());
         let active_visible_rows = match last_content_row {
             Some(idx) => (idx + 1).max((cursor_row as usize) + 1),
             None => (cursor_row as usize) + 1,
@@ -79,7 +81,11 @@ impl Terminal {
         .min(rows as usize);
 
         if with_color {
-            for row_bytes in parser.screen().rows_formatted(0, cols).take(active_visible_rows) {
+            for row_bytes in parser
+                .screen()
+                .rows_formatted(0, cols)
+                .take(active_visible_rows)
+            {
                 all_lines.push(String::from_utf8_lossy(&row_bytes).to_string());
             }
         } else {
@@ -168,8 +174,18 @@ mod tests {
         assert!(last_4.contains("Line 10"));
 
         let all = term.read(None, true, false);
-        assert!(all.contains("Line 1"));
+        assert!(all.contains("Line 1\n"), "All output:\n{all}");
         assert!(all.contains("Line 10"));
+
+        let term_large = Terminal::new(5, 80, 1000);
+        for i in 1..=100 {
+            term_large.process(format!("Line {i}\r\n").as_bytes());
+        }
+        let all_large = term_large.read(None, true, false);
+        assert!(all_large.contains("Line 1\n"));
+        assert!(all_large.contains("Line 50\n"));
+        assert!(all_large.contains("Line 100"));
+        assert_eq!(all_large.lines().count(), 100);
     }
 
     #[test]
