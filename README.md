@@ -204,6 +204,21 @@ $ ttyman write -s dev $'\x1d'
 $ ttyman write -s dev --bracketed-paste < script.py
 ```
 
+### `ttyman completion`
+
+Generate shell completion scripts for `bash`, `zsh`, `fish`, `powershell`, or `elvish`:
+
+```bash
+# Zsh (add to ~/.zshrc):
+eval "$(ttyman completion zsh)"
+
+# Bash (add to ~/.bashrc):
+source <(ttyman completion bash)
+
+# Fish:
+ttyman completion fish | source
+```
+
 ---
 
 ## "Bring Your Own Menu" (BYOM)

@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] - 2026-09-03
+
+### Added
+- **`ttyman completion` subcommand**: Generate shell completion scripts for `bash`, `zsh`, `fish`, `powershell`, and `elvish`.
+- **Dynamic session name completion**: Real-time auto-completion of active session names for `-s, --session` on Zsh, Bash, and Fish.
+
+### Fixed
+- **Test environment isolation**: Strip session environment variables (`$TTYMAN_SESSION`, `$TTYMAN_PID`) in tests to ensure test suites run cleanly inside active sessions.
+
 ## [0.2.0] - 2026-08-29
 
 ### Added

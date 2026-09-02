@@ -1044,3 +1044,19 @@ fn test_list_current_session_indicator_e2e() {
     assert_eq!(e1["is_current"], true);
     assert_eq!(e2["is_current"], false);
 }
+
+#[test]
+fn test_completion_e2e() {
+    let env = TestEnv::new();
+
+    let bash_out = env.run(&["completion", "bash"]);
+    assert!(bash_out.contains("_ttyman_sessions"));
+
+    let zsh_out = env.run(&["completion", "zsh"]);
+    assert!(zsh_out.contains(":SESSION:_ttyman_sessions"));
+    assert!(zsh_out.contains("_ttyman_sessions()"));
+
+    let fish_out = env.run(&["completion", "fish"]);
+    assert!(fish_out.contains("__fish_ttyman_sessions"));
+    assert!(fish_out.contains("-a '(__fish_ttyman_sessions)'"));
+}

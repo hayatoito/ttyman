@@ -1,5 +1,5 @@
-use clap::{Parser, Subcommand};
-use ttyman::commands::{attach, kill, list, read, rename, start, watch, write};
+use clap::{CommandFactory, Parser, Subcommand};
+use ttyman::commands::{attach, completion, kill, list, read, rename, start, watch, write};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -37,6 +37,9 @@ enum Commands {
 
     /// List active sessions
     List(list::ListArgs),
+
+    /// Generate shell completion script
+    Completion(completion::CompletionArgs),
 }
 
 fn main() -> anyhow::Result<()> {
@@ -50,6 +53,10 @@ fn main() -> anyhow::Result<()> {
         Commands::Read(args) => ttyman::run_async(read::run(args)),
         Commands::Write(args) => ttyman::run_async(write::run(args)),
         Commands::List(args) => ttyman::run_async(list::run(args)),
+        Commands::Completion(args) => {
+            completion::run(args, &mut Cli::command());
+            Ok(())
+        }
     };
     match res {
         Ok(()) => std::process::exit(0),
