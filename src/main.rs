@@ -2,11 +2,7 @@ use clap::{CommandFactory, Parser, Subcommand};
 use ttyman::commands::{attach, completion, kill, list, read, rename, start, watch, write};
 
 #[derive(Parser, Debug)]
-#[command(
-    name = "ttyman",
-    version,
-    about = "Terminal session manager to persist and attach sessions, inspect screens and scrollback, stream live output, and inject input via IPC"
-)]
+#[command(name = "ttyman", version, about = "Terminal session manager")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -14,25 +10,25 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Start a session in the background (detached daemon)
+    /// Start a session in the background
     Start(start::StartArgs),
 
     /// Kill an active session
     Kill(kill::KillArgs),
 
-    /// Attach interactively to a session (spawns if not already running)
+    /// Attach to a session
     Attach(attach::AttachArgs),
 
     /// Rename an active session
     Rename(rename::RenameArgs),
 
-    /// Watch and stream a live running session in real-time
+    /// Stream live output from a session
     Watch(watch::WatchArgs),
 
-    /// Read screen snapshot or scrollback history from a running session
+    /// Read screen or scrollback from a session
     Read(read::ReadArgs),
 
-    /// Write text or inject commands into a running session
+    /// Write input to a session
     Write(write::WriteArgs),
 
     /// List active sessions

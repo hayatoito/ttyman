@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-11-04
+
+### Added
+- **`ttyman watch --exec CMD`** (experimental): Run a command on each session event instead of printing the raw stream, for AI agents and scripts that have difficulty following the raw stream. What the screen showed since the previous event is passed on stdin as plain text, with `$TTYMAN_SESSION` and `$TTYMAN_EVENT` set.
+  - `done`: output paused at the shell prompt (a command finished).
+  - `output`: a still-running command (e.g. `tail -f`) printed lines; sent after 0.5 s of quiet, or every 10 s while output continues.
+  - `exit`: the session ended.
+
+### Changed
+- **Shorter CLI help**: Simplified the top-level description and subcommand descriptions.
+
 ## [0.2.1] - 2026-09-03
 
 ### Added

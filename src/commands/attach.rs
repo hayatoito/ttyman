@@ -10,8 +10,6 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 use tokio::signal::unix::{SignalKind, signal};
 
-pub const DEFAULT_MENU_COMMAND: &str = "echo detach";
-
 #[derive(Args, Debug, Clone)]
 pub struct AttachArgs {
     /// Do not synchronize terminal window size on attach or resize
@@ -237,16 +235,8 @@ async fn attach_single_session(
 }
 
 async fn attach_client(initial_sock_path: PathBuf, args: AttachArgs) -> anyhow::Result<()> {
-    let file_cfg = crate::config::Config::load_default_or_explicit(args.config.as_deref());
-    let menu_key = file_cfg
-        .as_ref()
-        .map(crate::config::Config::menu_key)
-        .unwrap_or(0x1D);
-    let default_cmd = "echo detach".to_string();
-    let menu_command = file_cfg
-        .as_ref()
-        .map(crate::config::Config::menu_command)
-        .unwrap_or(&default_cmd);
+    let config =
+        crate::config::Config::load_default_or_explicit(args.config.as_deref()).unwrap_or_default();
 
     let mut raw_guard = Some(RawGuard::enter()?);
     let is_stdin_tty = std::io::stdin().is_terminal();
@@ -254,8 +244,8 @@ async fn attach_client(initial_sock_path: PathBuf, args: AttachArgs) -> anyhow::
     let mut history_stack: Vec<PathBuf> = Vec::new();
     let mut current_sock_path = initial_sock_path;
     let menu = MenuContext {
-        key: menu_key,
-        command: menu_command,
+        key: config.menu_key(),
+        command: config.menu_command(),
     };
 
     loop {
@@ -293,22 +283,18 @@ async fn attach_client(initial_sock_path: PathBuf, args: AttachArgs) -> anyhow::
 
                 // 2. Fallback: if history stack is empty, discover any other active session on the system
                 if next_target.is_none() {
-                    let mut candidates: Vec<(PathBuf, std::time::SystemTime)> = Vec::new();
-                    for sock in crate::ipc::find_socket_files() {
-                        if sock != current_sock_path
-                            && sock.exists()
-                            && std::os::unix::net::UnixStream::connect(&sock).is_ok()
-                        {
-                            let mtime = std::fs::metadata(&sock)
+                    next_target = crate::ipc::find_socket_files()
+                        .into_iter()
+                        .filter(|sock| {
+                            *sock != current_sock_path
+                                && sock.exists()
+                                && std::os::unix::net::UnixStream::connect(sock).is_ok()
+                        })
+                        .max_by_key(|sock| {
+                            std::fs::metadata(sock)
                                 .and_then(|m| m.modified())
-                                .unwrap_or(std::time::UNIX_EPOCH);
-                            candidates.push((sock, mtime));
-                        }
-                    }
-                    candidates.sort_by(|a, b| b.1.cmp(&a.1));
-                    if let Some((sock, _)) = candidates.into_iter().next() {
-                        next_target = Some(sock);
-                    }
+                                .unwrap_or(std::time::UNIX_EPOCH)
+                        });
                 }
 
                 if let Some(next_sock) = next_target {

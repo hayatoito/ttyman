@@ -1,5 +1,5 @@
 use crate::ipc::{
-    DEFAULT_SESSION_VAR, IpcRequest, IpcResponse, SessionInfo, bind_unix_listener,
+    DEFAULT_SESSION_VAR, IpcRequest, IpcResponse, SessionEvent, SessionInfo, bind_unix_listener,
     default_socket_path, named_socket_path, parse_name_from_socket_path, resolve_socket_path,
     validate_session_name,
 };
@@ -21,7 +21,18 @@ use tokio::io::unix::AsyncFd;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
 use tokio::signal::unix::{SignalKind, signal};
+use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::mpsc;
+
+/// Writes `value` as one line of JSON.
+async fn write_json_line<W: AsyncWriteExt + Unpin, T: serde::Serialize>(
+    writer: &mut W,
+    value: &T,
+) -> std::io::Result<()> {
+    let mut line = serde_json::to_string(value).unwrap_or_default();
+    line.push('\n');
+    writer.write_all(line.as_bytes()).await
+}
 
 pub struct SessionSharedState {
     pub pid: u32,
@@ -34,12 +45,32 @@ pub struct SessionSharedState {
     pub current_sock_path: std::sync::RwLock<PathBuf>,
 }
 
+impl SessionSharedState {
+    pub fn resize_pty(&self, rows: u16, cols: u16, terminal: &Terminal) {
+        if rows > 0 && cols > 0 {
+            let ws = Winsize {
+                ws_row: rows,
+                ws_col: cols,
+                ws_xpixel: 0,
+                ws_ypixel: 0,
+            };
+            set_terminal_winsize(self.master_raw_fd, &ws);
+            terminal.set_size(rows, cols);
+            let c_pid = self.child_pid.load(Ordering::SeqCst);
+            if c_pid > 0 {
+                let _ = kill(nix::unistd::Pid::from_raw(-c_pid), Signal::SIGWINCH);
+            }
+        }
+    }
+}
+
 pub fn start_ipc_server(
     listener: UnixListener,
     terminal: Terminal,
     inject_tx: mpsc::UnboundedSender<Vec<u8>>,
     state: Arc<SessionSharedState>,
     broadcast_tx: tokio::sync::broadcast::Sender<Vec<u8>>,
+    events_tx: tokio::sync::broadcast::Sender<SessionEvent>,
 ) {
     let my_uid = nix::unistd::geteuid().as_raw();
     tokio::spawn(async move {
@@ -58,6 +89,7 @@ pub fn start_ipc_server(
             let inject_tx = inject_tx.clone();
             let state = state.clone();
             let broadcast_tx = broadcast_tx.clone();
+            let events_tx = events_tx.clone();
             tokio::spawn(async move {
                 let (reader, mut writer) = stream.into_split();
                 let mut buf_reader = BufReader::new(reader);
@@ -74,9 +106,7 @@ pub fn start_ipc_server(
                     if line.len() >= MAX_IPC_LINE_BYTES as usize && !line.ends_with('\n') {
                         let resp =
                             IpcResponse::Error("Request exceeds maximum size limit (16MB)".into());
-                        let mut resp_str = serde_json::to_string(&resp).unwrap_or_default();
-                        resp_str.push('\n');
-                        let _ = writer.write_all(resp_str.as_bytes()).await;
+                        let _ = write_json_line(&mut writer, &resp).await;
                         break;
                     }
                     let resp = match serde_json::from_str::<IpcRequest>(&line) {
@@ -96,39 +126,35 @@ pub fn start_ipc_server(
                             }
                             return;
                         }
+                        Ok(IpcRequest::SubscribeEvents) => {
+                            let mut events_rx = events_tx.subscribe();
+                            loop {
+                                match events_rx.recv().await {
+                                    Ok(ev) => {
+                                        if write_json_line(&mut writer, &ev).await.is_err()
+                                            || ev.event == "exit"
+                                        {
+                                            return;
+                                        }
+                                    }
+                                    Err(RecvError::Lagged(_)) => continue,
+                                    Err(RecvError::Closed) => return,
+                                }
+                            }
+                        }
                         Ok(IpcRequest::Attach { cols, rows }) => {
-                            state
-                                .clients
-                                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            state.clients.fetch_add(1, Ordering::SeqCst);
 
                             struct ClientGuard(Arc<SessionSharedState>);
                             impl Drop for ClientGuard {
                                 fn drop(&mut self) {
-                                    self.0
-                                        .clients
-                                        .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                                    self.0.clients.fetch_sub(1, Ordering::SeqCst);
                                 }
                             }
                             let _client_guard = ClientGuard(state.clone());
 
-                            if let (Some(c), Some(r)) = (cols, rows)
-                                && c > 0
-                                && r > 0
-                            {
-                                let ws = nix::pty::Winsize {
-                                    ws_row: r,
-                                    ws_col: c,
-                                    ws_xpixel: 0,
-                                    ws_ypixel: 0,
-                                };
-                                set_terminal_winsize(state.master_raw_fd, &ws);
-                                terminal.set_size(r, c);
-                                let c_pid =
-                                    state.child_pid.load(std::sync::atomic::Ordering::SeqCst);
-                                if c_pid > 0 {
-                                    let _ =
-                                        kill(nix::unistd::Pid::from_raw(-c_pid), Signal::SIGWINCH);
-                                }
+                            if let (Some(c), Some(r)) = (cols, rows) {
+                                state.resize_pty(r, c, &terminal);
                             }
                             let initial_payload = terminal.redraw_payload();
                             if writer.write_all(&initial_payload).await.is_err() {
@@ -164,9 +190,7 @@ pub fn start_ipc_server(
                         Ok(req) => handle_ipc_request(req, &state, &terminal, &inject_tx),
                         Err(e) => IpcResponse::Error(e.to_string()),
                     };
-                    let mut resp_str = serde_json::to_string(&resp).unwrap_or_default();
-                    resp_str.push('\n');
-                    if writer.write_all(resp_str.as_bytes()).await.is_err() {
+                    if write_json_line(&mut writer, &resp).await.is_err() {
                         break;
                     }
                     line.clear();
@@ -184,20 +208,7 @@ fn handle_ipc_request(
 ) -> IpcResponse {
     match req {
         IpcRequest::Resize { cols, rows } => {
-            if cols > 0 && rows > 0 {
-                let ws = nix::pty::Winsize {
-                    ws_row: rows,
-                    ws_col: cols,
-                    ws_xpixel: 0,
-                    ws_ypixel: 0,
-                };
-                set_terminal_winsize(state.master_raw_fd, &ws);
-                terminal.set_size(rows, cols);
-                let c_pid = state.child_pid.load(std::sync::atomic::Ordering::SeqCst);
-                if c_pid > 0 {
-                    let _ = kill(nix::unistd::Pid::from_raw(-c_pid), Signal::SIGWINCH);
-                }
-            }
+            state.resize_pty(rows, cols, terminal);
             IpcResponse::Ok("resized".into())
         }
         IpcRequest::Read {
@@ -485,7 +496,7 @@ fn handle_nested_session(
 
 async fn run_daemon_server(
     sock_path: PathBuf,
-    _config: Option<String>,
+    config: Option<String>,
     exec_cmd: String,
     exec_args: Vec<String>,
     pipe_w_raw_fd: RawFd,
@@ -503,14 +514,13 @@ async fn run_daemon_server(
     let master_fd = pty_res.master;
     let slave_fd = pty_res.slave;
 
-    let file_cfg = crate::config::Config::load_default_or_explicit(_config.as_deref());
-    let scrollback = file_cfg
-        .as_ref()
-        .map(crate::config::Config::scrollback)
-        .unwrap_or(10_000);
+    let scrollback = crate::config::Config::load_default_or_explicit(config.as_deref())
+        .unwrap_or_default()
+        .scrollback();
     let terminal = Terminal::new(24, 80, scrollback);
     let (inject_tx, inject_rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let (broadcast_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(1024);
+    let (events_tx, _) = tokio::sync::broadcast::channel::<SessionEvent>(64);
     let started_at_epoch_sec = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -537,6 +547,7 @@ async fn run_daemon_server(
         inject_tx,
         shared_state.clone(),
         broadcast_tx.clone(),
+        events_tx.clone(),
     );
 
     // Notify parent process that daemon is ready
@@ -562,6 +573,15 @@ async fn run_daemon_server(
             let master_file = std::fs::File::from(master_fd);
             let async_master = AsyncFd::new(master_file)?;
 
+            let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+            let detector = tokio::spawn(crate::events::run_event_detector(
+                terminal.clone(),
+                shared_state.clone(),
+                broadcast_tx.subscribe(),
+                events_tx.clone(),
+                shutdown_rx,
+            ));
+
             let _ = run_pty_event_loop(
                 child,
                 async_master,
@@ -572,9 +592,30 @@ async fn run_daemon_server(
             )
             .await;
 
+            // Send the final `exit` event and give event subscribers a moment to write it before
+            // the process exits (each one disconnects after `exit`).
+            let _ = shutdown_tx.send(());
+            let _ = detector.await;
+            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+            while events_tx.receiver_count() > 0 && std::time::Instant::now() < deadline {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+
             Ok(())
         }
     }
+}
+
+async fn forward_signal_and_notify(
+    child: nix::unistd::Pid,
+    sig: Signal,
+    notice: &[u8],
+    broadcast_tx: &tokio::sync::broadcast::Sender<Vec<u8>>,
+) {
+    let _ = broadcast_tx.send(notice.to_vec());
+    let _ = kill(nix::unistd::Pid::from_raw(-child.as_raw()), sig);
+    let _ = kill(child, sig);
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 }
 
 pub async fn run_pty_event_loop(
@@ -624,24 +665,15 @@ pub async fn run_pty_event_loop(
                 let _ = nix_write(master_file, &inject_bytes);
             }
             _ = sig_term.recv() => {
-                let _ = broadcast_tx.send(b"\r\n[ttyman: Session terminated by SIGTERM]\r\n".to_vec());
-                let _ = kill(nix::unistd::Pid::from_raw(-child.as_raw()), Signal::SIGTERM);
-                let _ = kill(child, Signal::SIGTERM);
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                forward_signal_and_notify(child, Signal::SIGTERM, b"\r\n[ttyman: Session terminated by SIGTERM]\r\n", &broadcast_tx).await;
                 break;
             }
             _ = sig_int.recv() => {
-                let _ = broadcast_tx.send(b"\r\n[ttyman: Session interrupted by SIGINT]\r\n".to_vec());
-                let _ = kill(nix::unistd::Pid::from_raw(-child.as_raw()), Signal::SIGINT);
-                let _ = kill(child, Signal::SIGINT);
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                forward_signal_and_notify(child, Signal::SIGINT, b"\r\n[ttyman: Session interrupted by SIGINT]\r\n", &broadcast_tx).await;
                 break;
             }
             _ = sig_hup.recv() => {
-                let _ = broadcast_tx.send(b"\r\n[ttyman: Session terminated by SIGHUP]\r\n".to_vec());
-                let _ = kill(nix::unistd::Pid::from_raw(-child.as_raw()), Signal::SIGHUP);
-                let _ = kill(child, Signal::SIGHUP);
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                forward_signal_and_notify(child, Signal::SIGHUP, b"\r\n[ttyman: Session terminated by SIGHUP]\r\n", &broadcast_tx).await;
                 break;
             }
         }

@@ -6,18 +6,7 @@ _Zero-interference terminal session manager._
 [![CI](https://github.com/hayatoito/ttyman/actions/workflows/ci.yml/badge.svg)](https://github.com/hayatoito/ttyman/actions)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](https://github.com/hayatoito/ttyman)
 
-`ttyman` persists, detaches, and reattaches terminal sessions without extra UI. Every session runs in an isolated background PTY with a Unix domain socket for IPC.
-
-```text
-[ Your Terminal ] <====== (Ctrl-] detach / attach) ======> [ ttyman session "dev" ]
-                                                                  │ (PTY)
-                                                            [ $SHELL / vim / top ]
-                                                                  │
-  [ External Scripts / AI Agent ]                                 │ (UNIX Socket)
-  ├── ttyman read  (snapshot / scrollback) ─────────────────────> [ IPC Server ]
-  ├── ttyman watch (stream live terminal output) ───────────────>
-  └── ttyman write (inject keystrokes / commands) ──────────────>
-```
+`ttyman` persists, detaches, and reattaches terminal sessions without extra UI.
 
 ---
 
@@ -184,6 +173,33 @@ You can prompt your AI coding agent to observe your interactive session in real 
 > _"Please run `ttyman watch -s main` in the background to monitor my terminal session and advise me whenever an error occurs."_
 
 `ttyman watch` can be considered a read-only attach mode. No keystrokes are forwarded to the session. For example, pressing Ctrl-C exits `ttyman watch` itself, leaving the session running uninterrupted.
+
+#### Run a command on session events (`--exec`, experimental)
+
+> [!NOTE]
+> `--exec` is experimental, and its events and text may change. It is meant for AI agents and scripts that have difficulty following the raw stream of `ttyman watch`.
+
+With `--exec CMD`, `ttyman watch` runs `CMD` (via `sh -c`) on each session event instead of printing the raw stream. What the screen showed since the previous event is passed on stdin as plain text: the command line, its output, and the next prompt. Joined together, the texts of consecutive events read like the screen.
+
+```bash
+# Print each event and its output:
+$ ttyman watch -s dev --exec 'echo; echo "== $TTYMAN_EVENT"; cat'
+
+# Forward each event to an AI agent. `notify-agent` stands for a command that sends its stdin
+# (the event's text) to your agent:
+$ ttyman watch -s dev --exec 'notify-agent'
+
+# Notify when a command finishes:
+$ ttyman watch -s dev --exec '[ "$TTYMAN_EVENT" = done ] && notify-send "dev: command finished"'
+```
+
+| Event | When |
+| :--- | :--- |
+| `done` | Output paused at the shell prompt: a command finished. |
+| `output` | A command that is still running (e.g. `tail -f`, a server) printed lines: after 0.5 s of quiet, or every 10 s while output continues. |
+| `exit` | The session ended. This is the last event. |
+
+Full-screen programs (`vim`, `less`, `top`) trigger no events while they run. `CMD` gets `$TTYMAN_SESSION` (the session name) and `$TTYMAN_EVENT` (the event name). Events are detected by the session daemon, so any number of watchers see the same events.
 
 ### `ttyman write`
 

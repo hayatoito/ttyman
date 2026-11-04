@@ -111,7 +111,7 @@ pub fn exec_in_child_pty(
 
     unsafe {
         std::env::set_var(crate::ipc::DEFAULT_SESSION_VAR, session_name);
-        std::env::set_var("TTYMAN_PID", daemon_pid.to_string());
+        std::env::set_var(crate::ipc::DEFAULT_PID_VAR, daemon_pid.to_string());
     }
 
     let c_cmd = std::ffi::CString::new(exec_cmd).unwrap_or_default();

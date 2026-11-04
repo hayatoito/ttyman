@@ -1,4 +1,4 @@
-use crate::ipc::{IpcRequest, IpcResponse, resolve_socket_path, send_ipc_request};
+use crate::ipc::{IpcRequest, IpcResponse, resolve_existing_socket_path, send_ipc_request};
 use clap::Args;
 
 #[derive(Args, Debug, Clone)]
@@ -14,13 +14,7 @@ pub struct RenameArgs {
 
 pub async fn run(args: RenameArgs) -> anyhow::Result<()> {
     crate::ipc::validate_session_name(&args.new_name)?;
-    let sock_path = resolve_socket_path(args.session.as_deref())?;
-
-    if !sock_path.exists() {
-        let session_name = crate::ipc::parse_name_from_socket_path(&sock_path);
-        let display = args.session.as_deref().unwrap_or(&session_name);
-        anyhow::bail!("Session '{display}' not found. Is the session active?");
-    }
+    let sock_path = resolve_existing_socket_path(args.session.as_deref())?;
 
     let req = IpcRequest::Rename {
         new_name: args.new_name.clone(),

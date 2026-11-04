@@ -26,6 +26,7 @@
 
 pub mod commands;
 pub mod config;
+pub mod events;
 pub mod ipc;
 pub mod pty;
 pub mod server;

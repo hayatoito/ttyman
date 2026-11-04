@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 pub const DEFAULT_SESSION_VAR: &str = "TTYMAN_SESSION";
+pub const DEFAULT_PID_VAR: &str = "TTYMAN_PID";
 
 pub fn validate_session_name(name: &str) -> anyhow::Result<()> {
     if name.is_empty() {
@@ -38,9 +39,7 @@ pub struct SessionInfo {
     pub started_at_epoch_sec: u64,
     pub command: Vec<String>,
     pub term_size: (u16, u16),
-    #[serde(default)]
     pub clients: usize,
-    #[serde(default)]
     pub pty_slave_path: Option<String>,
 }
 
@@ -181,16 +180,14 @@ pub enum IpcRequest {
     Redraw,
     Write {
         text: String,
-        #[serde(default)]
         enter: bool,
-        #[serde(default)]
         bracketed_paste: bool,
     },
     Subscribe,
+    /// Stream session events (see [`SessionEvent`]) as JSON lines until the session ends.
+    SubscribeEvents,
     Attach {
-        #[serde(default)]
         cols: Option<u16>,
-        #[serde(default)]
         rows: Option<u16>,
     },
     Resize {
@@ -212,6 +209,19 @@ pub enum IpcResponse {
     Error(String),
 }
 
+/// An event detected by the session daemon, sent to `SubscribeEvents` clients one JSON per line.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct SessionEvent {
+    /// `done`: output paused at the shell prompt (a command finished).
+    /// `output`: a running command printed lines and paused (or kept printing for a while).
+    /// `exit`: the session ended; it is the last event.
+    pub event: String,
+    /// What the screen showed since the previous event, as plain text (see
+    /// `terminal::NewText::take`). The texts of consecutive events joined together read like the
+    /// screen.
+    pub text: String,
+}
+
 pub fn parse_name_from_socket_path(path: &Path) -> String {
     if let Some(filename) = path.file_name().and_then(|n| n.to_str())
         && let Some(s) = filename.strip_prefix("ttyman-")
@@ -219,6 +229,11 @@ pub fn parse_name_from_socket_path(path: &Path) -> String {
         return s.to_string();
     }
     path.to_string_lossy().to_string()
+}
+
+fn fallback_runtime_dir() -> (u32, PathBuf) {
+    let uid = nix::unistd::geteuid().as_raw();
+    (uid, PathBuf::from(format!("/tmp/ttyman-{uid}")))
 }
 
 pub fn get_runtime_dir() -> anyhow::Result<PathBuf> {
@@ -229,8 +244,7 @@ pub fn get_runtime_dir() -> anyhow::Result<PathBuf> {
     }
 
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
-    let uid = nix::unistd::geteuid().as_raw();
-    let fallback_dir = PathBuf::from(format!("/tmp/ttyman-{uid}"));
+    let (uid, fallback_dir) = fallback_runtime_dir();
     if !fallback_dir.exists() {
         std::fs::create_dir_all(&fallback_dir)?;
         let _ = std::fs::set_permissions(&fallback_dir, std::fs::Permissions::from_mode(0o700));
@@ -263,8 +277,7 @@ pub fn named_socket_path(name: &str) -> anyhow::Result<PathBuf> {
 
 fn find_socket_for_name(name: &str) -> anyhow::Result<PathBuf> {
     validate_session_name(name)?;
-    let uid = nix::unistd::geteuid().as_raw();
-    let fallback_dir = PathBuf::from(format!("/tmp/ttyman-{uid}"));
+    let (_, fallback_dir) = fallback_runtime_dir();
 
     let named = named_socket_path(name)?;
     if named.exists() {
@@ -302,7 +315,7 @@ pub fn resolve_socket_path(target: Option<&str>) -> anyhow::Result<PathBuf> {
     }
     // Fallback: If $TTYMAN_SESSION is missing or stale (e.g. after rename),
     // find the active session socket associated with $TTYMAN_PID.
-    if let Ok(pid_str) = std::env::var("TTYMAN_PID")
+    if let Ok(pid_str) = std::env::var(DEFAULT_PID_VAR)
         && let Ok(pid) = pid_str.parse::<u32>()
     {
         for sock in find_socket_files() {
@@ -320,13 +333,22 @@ pub fn resolve_socket_path(target: Option<&str>) -> anyhow::Result<PathBuf> {
     )
 }
 
+pub fn resolve_existing_socket_path(target: Option<&str>) -> anyhow::Result<PathBuf> {
+    let sock_path = resolve_socket_path(target)?;
+    if !sock_path.exists() {
+        let session_name = parse_name_from_socket_path(&sock_path);
+        let display = target.unwrap_or(&session_name);
+        anyhow::bail!("Session '{display}' not found. Is the session active?");
+    }
+    Ok(sock_path)
+}
+
 pub fn find_socket_files() -> Vec<PathBuf> {
     let mut search_dirs = Vec::new();
     if let Ok(runtime_dir) = get_runtime_dir() {
         search_dirs.push(runtime_dir);
     }
-    let uid = nix::unistd::geteuid().as_raw();
-    let fallback_dir = PathBuf::from(format!("/tmp/ttyman-{uid}"));
+    let (_, fallback_dir) = fallback_runtime_dir();
     if fallback_dir.exists() && !search_dirs.contains(&fallback_dir) {
         search_dirs.push(fallback_dir);
     }

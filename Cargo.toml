@@ -4,7 +4,7 @@ version = "0.2.1"
 edition = "2024"
 authors = ["Hayato Ito <hayatoito@gmail.com>"]
 license = "MIT OR Apache-2.0"
-description = "Terminal session manager to persist and attach sessions, inspect screens and scrollback, stream live output, and inject input via IPC"
+description = "Terminal session manager"
 readme = "README.md"
 repository = "https://github.com/hayatoito/ttyman"
 homepage = "https://github.com/hayatoito/ttyman"
@@ -15,7 +15,7 @@ categories = ["command-line-utilities", "development-tools"]
 anyhow = "1.0"
 clap = { version = "4.6", features = ["derive", "env"] }
 clap_complete = "4.6"
-nix = { version = "0.31", features = ["ioctl", "process", "signal", "term", "fs", "poll", "user"] }
+nix = { version = "0.31", features = ["process", "signal", "term", "fs", "user"] }
 crossterm = "0.29"
 tokio = { version = "1.53", features = ["full"] }
 vt100 = "0.16"

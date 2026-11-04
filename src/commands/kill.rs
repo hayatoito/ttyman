@@ -1,4 +1,4 @@
-use crate::ipc::{parse_name_from_socket_path, query_session_info, resolve_socket_path};
+use crate::ipc::{parse_name_from_socket_path, query_session_info, resolve_existing_socket_path};
 use clap::Args;
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
@@ -11,13 +11,8 @@ pub struct KillArgs {
 }
 
 pub fn run(args: KillArgs) -> anyhow::Result<()> {
-    let sock_path = resolve_socket_path(args.session.as_deref())?;
+    let sock_path = resolve_existing_socket_path(args.session.as_deref())?;
     let session_name = parse_name_from_socket_path(&sock_path);
-
-    if !sock_path.exists() {
-        let display = args.session.as_deref().unwrap_or(&session_name);
-        anyhow::bail!("Session '{display}' not found. Is the session active?");
-    }
 
     let info = match query_session_info(&sock_path) {
         Ok(info) => info,

@@ -169,6 +169,33 @@ impl TestEnv {
     }
 }
 
+/// Stop every session daemon still running in this environment. Many tests end without killing
+/// their sessions (or only ask the shell to `exit`), and a daemon outlives its deleted runtime dir.
+impl Drop for TestEnv {
+    fn drop(&mut self) {
+        let Ok(out) = self.cmd().args(["list", "--json"]).output() else {
+            return;
+        };
+        let sessions: Vec<serde_json::Value> =
+            serde_json::from_slice(&out.stdout).unwrap_or_default();
+        let pids: Vec<Pid> = sessions
+            .iter()
+            .filter_map(|s| s["pid"].as_i64())
+            .map(|p| Pid::from_raw(p as i32))
+            .collect();
+        for pid in &pids {
+            let _ = kill(*pid, Signal::SIGTERM);
+        }
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline && pids.iter().any(|p| kill(*p, None).is_ok()) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        for pid in &pids {
+            let _ = kill(*pid, Signal::SIGKILL);
+        }
+    }
+}
+
 #[test]
 fn test_read_outside_session() {
     let env = TestEnv::new();
@@ -328,6 +355,47 @@ fn test_watch_e2e() {
     assert!(String::from_utf8_lossy(&watch_out.stdout).contains("LIVE STREAM WATCH VERIFIED"));
 
     let _ = env.run(&["kill", "-s", name]);
+}
+
+#[test]
+fn test_watch_exec_e2e() {
+    let env = TestEnv::new();
+    let name = "t_watch_exec";
+    let log = env.file_path("events.log");
+    env.run(&["start", "-s", name, "--", "sh"]);
+    assert!(env.wait_path(&env.sock_path(name)));
+
+    let exec = format!(
+        "{{ echo \"== $TTYMAN_EVENT $TTYMAN_SESSION\"; cat; echo; }} >> '{}'",
+        log.display()
+    );
+    let mut watch_child = env
+        .cmd()
+        .args(["watch", "-s", name, "--exec", &exec])
+        .spawn()
+        .expect("spawn watch --exec");
+    std::thread::sleep(Duration::from_millis(200));
+    env.run(&["write", "-s", name, "-E", "echo E2E_EXEC_MARKER"]);
+
+    // `done` follows 0.5 s after the output stops.
+    let read_log = || std::fs::read_to_string(&log).unwrap_or_default();
+    for _ in 0..100 {
+        if read_log().contains("E2E_EXEC_MARKER") {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let text = read_log();
+    assert!(text.contains(&format!("== done {name}")), "events:\n{text}");
+    assert!(
+        text.contains("echo E2E_EXEC_MARKER\nE2E_EXEC_MARKER\n"),
+        "events:\n{text}"
+    );
+
+    // Killing the session sends `exit`, and `watch --exec` returns.
+    env.run(&["kill", "-s", name]);
+    assert!(watch_child.wait().unwrap().success());
+    assert!(read_log().contains(&format!("== exit {name}")));
 }
 
 #[test]
